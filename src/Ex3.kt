@@ -170,8 +170,9 @@ fun findEulerianPaths(
 // -----------------------------------------------------------------------------
 
 fun main() {
-    val fileInput  = "results/Result_2.csv"
-    val fileOutput = "results/Result_3.csv"
+    val filePath   = "SRR494099.fastq.gz"
+    val fileInput  = "results/Result_2_" + filePath.substring(0, filePath.length-9) + ".csv"
+    val fileOutput = "results/Result_3_"+ filePath.substring(0, filePath.length-9) + ".csv"
     val numThreads = Runtime.getRuntime().availableProcessors()
 
     println("---- Using $numThreads threads (availableProcessors)")

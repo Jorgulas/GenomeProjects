@@ -44,7 +44,7 @@ private val SPACES = " ".repeat(MIN_LINE_WIDTH)
 /** True for FASTQ metadata/quality-score header lines and blank lines. */
 @Suppress("NOTHING_TO_INLINE")
 private inline fun isMetadataLine(line: String) =
-    line.isEmpty() || line[0] == '@' || line[0] == '+' || line[0] == '?'
+    line.isEmpty() || !isValidChar(line[0])
 
 /** True iff [c] is a valid nucleotide symbol (A, T, C, G or N). */
 @Suppress("NOTHING_TO_INLINE")
@@ -253,7 +253,7 @@ fun main() {
         }
     }
 
-    val fileOutput = "results/Result_1.csv"
+    val fileOutput = "results/Result_1_" + filePath.substring(0, filePath.length-9) + ".csv"
     val k           = 3
     val numThreads = Runtime.getRuntime().availableProcessors()
 
