@@ -8,19 +8,6 @@
  */
 
 import java.io.File
-import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
-
-
-
-// -----------------------------------------------------------------------------
-// Batch model
-// -----------------------------------------------------------------------------
-
-private val EX4_POISON = LineBatch(-1, emptyList())
-
-private const val EX4_QUEUE_CAPACITY = 20
-private const val EX4_BATCH_SIZE = 10_000
 
 
 // -----------------------------------------------------------------------------
@@ -125,47 +112,6 @@ private fun getContigs(graph: HashMap<String, HashSet<String>>): List<String> {
     return contigs
 }
 
-// -----------------------------------------------------------------------------
-// Worker — one batch → one temp file with one contig-list line per graph line
-// -----------------------------------------------------------------------------
-
-/**
- * Consumes [ContigBatch]es until the poison pill arrives.
- *
- * For **each input line** in the batch:
- *  1. Parses the distinct De Bruijn graph.
- *  2. Finds all maximal non-branching paths.
- *  3. Writes one output line: `seq1,seq2,...`
- *
- * Temp file: `{batchId}.ex4`, one contig-list line per input graph line.
- */
-private fun contigWorker(
-    queue: LinkedBlockingQueue<LineBatch>,
-    tempFolder: String
-) {
-    while (true) {
-        val batch = queue.take()
-        if (batch.batchId == -1) break
-
-        val tempFile = File(tempFolder, "${batch.batchId}.ex4")
-        tempFile.bufferedWriter().use { writer ->
-            for (line in batch.lines) {
-                if (line.isBlank()) continue
-
-                val graph = parseGraph(line)
-                if (graph.isEmpty()) continue
-
-                val contigs = getContigs(graph)
-                if (contigs.isEmpty()) continue
-
-                // One output line: contig1,contig2,...
-                writer.write(contigs.joinToString(SEPARATOR.toString()))
-                writer.newLine()
-            }
-        }
-    }
-}
-
 
 // -----------------------------------------------------------------------------
 // Main pipeline
@@ -182,50 +128,68 @@ private fun contigWorker(
  *
  * Output: one line per read, format `seq1,seq2,...` (comma-separated contigs).
  */
-fun findContigs(
-    fileInput: String,
-    fileOutput: String,
-    numThreads: Int = Runtime.getRuntime().availableProcessors(),
-    tempFolder: String = "temporary_files/ex4/"
-) {
-    File(tempFolder).mkdirs()
+fun findContigs(fileInput: String, fileOutput: String) {
+    println("---- Loading entire Global Graph into memory...")
+    val globalGraph = HashMap<String, HashSet<String>>()
 
-    val queue = LinkedBlockingQueue<LineBatch>(EX4_QUEUE_CAPACITY)
-    val executor = Executors.newFixedThreadPool(numThreads)
+    // 1. Load the entire graph
+    File(fileInput).useLines { lines ->
+        lines.forEach { line ->
+            if (line.isNotBlank()) {
+                val arrowIdx = line.indexOf(CONNECTOR)
+                val semiIdx = line.indexOf(SEPARATOR)
+                if (arrowIdx != -1) {
+                    val prefix = line.substring(0, arrowIdx)
+                    // Read up to the semicolon to ignore the weights
+                    val suffixStr = if (semiIdx != -1) line.substring(arrowIdx + 1, semiIdx)
+                    else line.substring(arrowIdx + 1)
 
-    val futures = (0..<numThreads).map {
-        executor.submit { contigWorker(queue, tempFolder) }
+                    val neighbors = HashSet<String>()
+                    suffixStr.split(DELIMITER).forEach { if (it.isNotBlank()) neighbors.add(it) }
+                    globalGraph[prefix] = neighbors
+                }
+            }
+        }
     }
-    executor.shutdown()
 
-    println("---- Reading De Bruijn graph file: $fileInput")
-    val linesRead = processFileBatches(fileInput, queue, EX4_BATCH_SIZE)
-    println("---- Total graph lines read: $linesRead")
+    println("------ Graph loaded. Nodes: ${globalGraph.size}")
+    println("---- Extracting contigs...")
 
-    repeat(numThreads) { queue.put(EX4_POISON) }
-    futures.forEach { it.get() }
-    println("---- Finished extracting contigs.")
+    // 2. Run your existing getContigs function ONCE on the full graph
+    val contigs = getContigs(globalGraph)
 
-    mergeTempFiles(fileOutput, tempFolder, extension = ".ex4")
+    // 3. Write output
+    File(fileOutput).bufferedWriter().use { writer ->
+        contigs.forEach {
+            writer.write(it)
+            writer.newLine()
+        }
+    }
+    println("------ Finished extracting ${contigs.size} contigs.")
 }
 
 // -----------------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------------
+class Ex4 {
+    companion object {
+        fun run(fileInput: String, fileOutput:String) {
+            measureAndPrintTime("Finished extracting contigs") {
+                findContigs(
+                    fileInput  = fileInput,
+                    fileOutput = fileOutput
+                )
+            }
+        }
+    }
+}
 
+// -----------------------------------------------------------------------------
+// Standalone entry point for direct execution
+// -----------------------------------------------------------------------------
 fun main() {
     val filePath   = "SRR494099.fastq.gz"
     val fileInput  = "results/Result_2_" + filePath.substring(0, filePath.length-9) + ".csv"
     val fileOutput = "results/Result_4_"+ filePath.substring(0, filePath.length-9) + ".csv"
-    val numThreads = Runtime.getRuntime().availableProcessors()
-
-    println("---- Using $numThreads threads (availableProcessors)")
-
-    measureAndPrintTime("Finished extracting contigs") {
-        findContigs(
-            fileInput  = fileInput,
-            fileOutput = fileOutput,
-            numThreads = numThreads
-        )
-    }
+    Ex4.run(fileInput,fileOutput)
 }

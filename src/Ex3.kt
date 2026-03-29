@@ -2,36 +2,21 @@
  * Um percurso Euleriano num grafo é um percurso que passa por todas as arestas do grafo exatamente uma vez. Para
  * existir um grafo Caminho Euleriano tem de existir no máximo um vértice que tem (outdegree)- (indegree) = 1 e
  * no máximo um vértice tem (indegree)- (outdegree) = 1. Todos os outros vértices têm indegree e outdegree iguais.
- * Neste trabalho assuma que os dados utilizados permitem sempre a existˆencia de um percurso Euleriano. Para obter o
- * percurso Euleriano, deverá utilizar o algoritmo de Hierholzer. Note que pode existir mais do que um percurso. Para
- * o exemplo do exercício 1, um percurso possível será:
- * EurelianPath:
- * AA-> AT-> TG-> GG-> GG-> GA-> AT-> TG-> GC-> CC-> CA-> AT-> TG-> GT-> TT-> TA-> AA
- *
+ * Neste trabalho assuma que os dados utilizados permitem sempre a existência de um percurso Euleriano. Para obter o
+ * percurso Euleriano, deverá utilizar o algoritmo de Hierholzer.
  */
 
 import java.io.File
-import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
-
 
 // -----------------------------------------------------------------------------
-// Batch model
+// Start-vertex selection (Global Graph)
 // -----------------------------------------------------------------------------
 
-private val EX3_POISON = LineBatch(-1, emptyList())
-private const val EX3_BATCH_SIZE = 10_000
-private const val EX3_QUEUE_CAPACITY = 20
-
-
-// -----------------------------------------------------------------------------
-// Start-vertex selection (per-line graph)
-// -----------------------------------------------------------------------------
-
-private fun findStartVertex(graph: Map<String, HashSet<String>>): String {
+private fun findStartVertex(graph: Map<String, MutableList<String>>): String {
     val outDeg = HashMap<String, Int>(graph.size * 2)
     val inDeg  = HashMap<String, Int>(graph.size * 2)
 
+    // Calculate In-Degrees and Out-Degrees
     for ((prefix, neighbors) in graph) {
         outDeg[prefix] = (outDeg[prefix] ?: 0) + neighbors.size
         for (suf in neighbors) {
@@ -39,25 +24,33 @@ private fun findStartVertex(graph: Map<String, HashSet<String>>): String {
         }
     }
 
+    // Find the mathematical start of the Eulerian path
     for ((v, out) in outDeg) {
-        if (out - (inDeg[v] ?: 0) == 1) return v
+        if (out - (inDeg[v] ?: 0) == 1) {
+            println("------ Found specific start vertex: $v")
+            return v
+        }
     }
 
-    return graph.keys.first()
+    // If perfect cycles exist everywhere, just pick the first available node
+    val fallback = graph.keys.firstOrNull() ?: ""
+    println("------ No unbalanced start node found. Defaulting to: $fallback")
+    return fallback
 }
 
 // -----------------------------------------------------------------------------
-// Hierholzer's algorithm (per-line)
+// Hierholzer's algorithm (Global Graph)
 // -----------------------------------------------------------------------------
 
 /**
- * Finds an Eulerian path in [graph] for a single read using Hierholzer's algorithm.
- *
- * Edges are removed via [ArrayDeque.removeFirst] as they are traversed (O(1)).
- * The graph is tiny for a single read so this is both correct and fast.
+ * Finds an Eulerian path in the [graph] using Hierholzer's algorithm.
+ * * Note: We use a MutableList instead of HashSet here because if an edge
+ * appeared 5 times in the original reads, we must walk that edge 5 times!
  */
-private fun hierholzerLine(graph: HashMap<String, HashSet<String>>): ArrayDeque<String> {
+private fun hierholzerGlobal(graph: HashMap<String, MutableList<String>>): ArrayDeque<String> {
     val start = findStartVertex(graph)
+    if (start.isEmpty()) return ArrayDeque()
+
     val stack = ArrayDeque<String>()
     val path  = ArrayDeque<String>()
 
@@ -66,122 +59,114 @@ private fun hierholzerLine(graph: HashMap<String, HashSet<String>>): ArrayDeque<
     while (stack.isNotEmpty()) {
         val v = stack.last()
         val neighbors = graph[v]
+
         if (!neighbors.isNullOrEmpty()) {
-            val first = neighbors.first()
-            stack.addLast(first)
-            neighbors.remove(first)
-            continue
+            // Remove the last edge to mark it as "visited" (O(1) operation)
+            val next = neighbors.removeLast()
+            stack.addLast(next)
+        } else {
+            // Dead end reached, push to final path and backtrack
+            path.addFirst(stack.removeLast())
         }
-        path.addFirst(stack.removeLast())
     }
     return path
 }
 
 // -----------------------------------------------------------------------------
-// Worker — processes one batch → one temp file with one path line per graph line
+// Main sequential pipeline
 // -----------------------------------------------------------------------------
 
 /**
- * Consumes [GraphLineBatch]es from [queue] until the poison pill arrives.
- *
- * For **each line** in the batch:
- *  1. Parses the De Bruijn graph for that read.
- *  2. Runs Hierholzer's algorithm to find the Eulerian path.
- *  3. Writes one output line: `v1->v2->v3->...`
- *
- * Output temp file: `{batchId}.ex3` — one path line per input graph line.
+ * Sequentially loads the global graph, reconstructing edge frequencies from
+ * the weighted format, and calculates the Eulerian Path.
  */
-private fun eulerianWorker(
-    queue: LinkedBlockingQueue<LineBatch>,
-    tempFolder: String
-) {
-    while (true) {
-        val batch = queue.take()
-        if (batch.batchId == -1) break
+fun findEulerianPaths(fileInput: String, fileOutput: String) {
+    println("---- Loading entire Global Graph into memory for Eulerian Path...")
 
-        val tempFile = File(tempFolder, "${batch.batchId}.ex3")
-        tempFile.bufferedWriter().use { writer ->
-            for (line in batch.lines) {
-                if (line.isBlank()) continue
+    // Using MutableList instead of HashSet to allow duplicate edges (weights)
+    val globalGraph = HashMap<String, MutableList<String>>()
+    var totalEdges = 0
 
-                val graph = parseGraph(line)
-                if (graph.isEmpty()) continue
+    File(fileInput).useLines { lines ->
+        lines.forEach { line ->
+            if (line.isNotBlank()) {
+                val arrowIdx = line.indexOf(CONNECTOR)
+                val semiIdx = line.indexOf(SEPARATOR)
 
-                val path = hierholzerLine(graph)
-                if (path.isEmpty()) continue
+                if (arrowIdx != -1) {
+                    val prefix = line.substring(0, arrowIdx)
 
-                // Write path: v1->v2->v3->...
-                for (i in path.indices) {
-                    if (i > 0) writer.write("->")
-                    writer.write(path[i])
+                    // Extract neighbors and counts
+                    val suffixStr = if (semiIdx != -1) line.substring(arrowIdx + 1, semiIdx)
+                    else line.substring(arrowIdx + 1)
+                    val countStr = if (semiIdx != -1 && semiIdx + 1 < line.length) line.substring(semiIdx + 1)
+                    else ""
+
+                    val neighbors = suffixStr.split(DELIMITER).filter { it.isNotBlank() }
+                    val counts = countStr.split(DELIMITER).filter { it.isNotBlank() }.mapNotNull { it.toIntOrNull() }
+
+                    val edgeList = globalGraph.getOrPut(prefix) { mutableListOf() }
+
+                    // If we have weights, expand them! (e.g., AC: 3 -> add AC, AC, AC)
+                    if (counts.size == neighbors.size) {
+                        for (i in neighbors.indices) {
+                            repeat(counts[i]) {
+                                edgeList.add(neighbors[i])
+                                totalEdges++
+                            }
+                        }
+                    } else {
+                        // Fallback if weights are missing
+                        edgeList.addAll(neighbors)
+                        totalEdges += neighbors.size
+                    }
                 }
-                writer.newLine()
             }
         }
     }
-}
 
+    println("------ Graph loaded. Nodes: ${globalGraph.size} | Total Edges: $totalEdges")
+    println("---- Calculating Eulerian path...")
 
-// -----------------------------------------------------------------------------
-// Main pipeline
-// -----------------------------------------------------------------------------
+    val path = hierholzerGlobal(globalGraph)
 
-/**
- * Finds an Eulerian path for each De Bruijn graph line in [fileInput] (Ex2 output)
- * using a producer-consumer pipeline:
- *
- * 1. [numThreads] workers start and block on queue.
- * 2. The calling thread reads [fileInput] line by line, enqueues batches.
- * 3. Each worker: per input line → parse graph → Hierholzer → one output line.
- * 4. Temp files are concatenated in batch order → [fileOutput].
- *
- * Output: one Eulerian path per line, format `v1->v2->v3->...`
- */
-fun findEulerianPaths(
-    fileInput: String,
-    fileOutput: String,
-    numThreads: Int = Runtime.getRuntime().availableProcessors(),
-    tempFolder: String = "temporary_files/ex3/"
-) {
-    File(tempFolder).mkdirs()
+    println("------ Path calculated. Path length: ${path.size} nodes.")
+    println("---- Writing output to $fileOutput...")
 
-    val queue = LinkedBlockingQueue<LineBatch>(EX3_QUEUE_CAPACITY)
-    val executor = Executors.newFixedThreadPool(numThreads)
-
-    val futures = (0..<numThreads).map {
-        executor.submit { eulerianWorker(queue, tempFolder) }
+    File(fileOutput).also { it.parentFile?.mkdirs() }.bufferedWriter().use { writer ->
+        if (path.isNotEmpty()) {
+            writer.write(path.joinToString("->"))
+            writer.newLine()
+        } else {
+            writer.write("No path found.")
+        }
     }
-    executor.shutdown()
-
-    println("---- Reading graph file: $fileInput")
-    val linesRead = processFileBatches(fileInput, queue, EX3_BATCH_SIZE)
-    println("---- Total graph lines read: $linesRead")
-
-    // One poison pill per worker to signal end-of-stream
-    repeat(numThreads) { queue.put(EX3_POISON) }
-    futures.forEach { it.get() }
-    println("---- Finished computing Eulerian paths.")
-
-    mergeTempFiles(fileOutput, tempFolder, extension = ".ex3")
+    println("------ Done.")
 }
 
 // -----------------------------------------------------------------------------
 // Entry point
 // -----------------------------------------------------------------------------
+class Ex3 {
+    companion object {
+        @JvmStatic
+        fun run(fileInput: String, fileOutput: String) {
+            measureAndPrintTime("Finished finding global Eulerian path") {
+                findEulerianPaths(
+                    fileInput  = fileInput,
+                    fileOutput = fileOutput
+                )
+            }
+        }
+    }
+}
 
+// -----------------------------------------------------------------------------
+// Standalone entry point for direct execution
+// -----------------------------------------------------------------------------
 fun main() {
     val filePath   = "SRR494099.fastq.gz"
     val fileInput  = "results/Result_2_" + filePath.substring(0, filePath.length-9) + ".csv"
-    val fileOutput = "results/Result_3_"+ filePath.substring(0, filePath.length-9) + ".csv"
-    val numThreads = Runtime.getRuntime().availableProcessors()
-
-    println("---- Using $numThreads threads (availableProcessors)")
-
-    measureAndPrintTime("Finished finding Eulerian paths") {
-        findEulerianPaths(
-            fileInput  = fileInput,
-            fileOutput = fileOutput,
-            numThreads = numThreads
-        )
-    }
+    val fileOutput = "results/Result_3_" + fileInput.substring(0, fileInput.length-9) + ".csv"
+    Ex3.run(fileInput, fileOutput)
 }

@@ -15,8 +15,8 @@ inline fun measureAndPrintTime(message: String, block: () -> Unit) {
     val startTime = System.currentTimeMillis()
     block()
     val elapsed = (System.currentTimeMillis() - startTime) / 1000.0
-    println("-- Execution Time: ${"%.2f".format(elapsed)} seconds")
-    println("== $message ==")
+    println("»» Execution Time: ${"%.2f".format(elapsed)} seconds")
+    println("»»» $message «««")
 }
 
 fun processFileBatches(
@@ -66,7 +66,7 @@ fun mergeTempFiles(fileOutput: String, tempFolder: String, extension: String) {
         ?.sortedBy { f -> f.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
         ?: emptyList()
 
-    println("---- Merging ${tempFiles.size} temporary files in batch order in $fileOutput...")
+    println("------ Merging ${tempFiles.size} temporary files in batch order in $fileOutput...")
 
     val outputPath = File(fileOutput).also { it.parentFile?.mkdirs() }.toPath()
     FileChannel.open(outputPath, CREATE, WRITE, TRUNCATE_EXISTING).use { out ->
@@ -80,47 +80,98 @@ fun mergeTempFiles(fileOutput: String, tempFolder: String, extension: String) {
             try { temp.delete() } catch (e: Exception) { println(">>>> Erro ao eliminar ${temp.name}: $e") }
         }
     }
-    println("-- Merge complete.")
+    println("------ Merge complete.")
 }
 
 
 /**
- * Parses one graph line from Ex2 output into a **distinct** adjacency map.
- *
- * Duplicate suffixes (e.g. `TG,TG,TG`) are deduplicated via [HashSet] because
- * contig analysis is structural: the branching/non-branching property of a node
- * depends on how many *distinct* in/out edges it has, not on edge multiplicities.
- *
- * Format: `prefix>suf1,suf2,...;prefix2>...;`
+ * Merges thread-specific vertex files and performs GLOBAL deduplication.
+ * This ensures that even if multiple threads found the same adjacency,
+ * it only appears once in the final Result_2 file.
  */
-fun parseGraph(line: String): HashMap<String, HashSet<String>> {
-    val graph = HashMap<String, HashSet<String>>(16)
+fun mergeVertexTempFilesWithWeights(fileOutput: String, tempFolder: String) {
+    val tempFiles = File(tempFolder).listFiles { f -> f.name.endsWith(".ex2") } ?: return
+    println("---- Merging ${tempFiles.size} thread dictionaries into global graph...")
 
-    var pos = 0
-    while (pos < line.length) {
-        val semiIdx = line.indexOf(SEPARATOR, pos)
-        val end = if (semiIdx == -1) line.length else semiIdx
-        val entry = line.substring(pos, end)
-        pos = end + 1
-        if (entry.isEmpty()) continue
+    // Massive global map to sum everything
+    val globalGraph = java.util.concurrent.ConcurrentHashMap<String, HashMap<String, Int>>()
 
-        val arrowIdx = entry.indexOf(CONNECTOR)
-        if (arrowIdx < 0) continue
+    // We can read the few thread files in parallel
+    tempFiles.toList().parallelStream().forEach { file ->
+        file.useLines { lines ->
+            lines.forEach { line ->
+                if (line.isBlank()) return@forEach
+                val arrowIdx = line.indexOf(CONNECTOR)
+                val prefix = line.substring(0, arrowIdx)
+                val suffixData = line.substring(arrowIdx + 1).split(DELIMITER)
 
-        val prefix = entry.substring(0, arrowIdx)
-        val suffixPart = entry.substring(arrowIdx + 1)
-        if (prefix.isEmpty() || suffixPart.isEmpty()) continue
+                val syncMap = globalGraph.computeIfAbsent(prefix) { HashMap() }
 
-        val neighbors = graph.getOrPut(prefix) { HashSet(4) }
-        var s = 0
-        while (s < suffixPart.length) {
-            val commaIdx = suffixPart.indexOf(DELIMITER, s)
-            val eod = if (commaIdx == -1) suffixPart.length else commaIdx
-            val suf = suffixPart.substring(s, eod)
-            if (suf.isNotEmpty()) neighbors.add(suf)   // HashSet deduplicates
-            s = eod + 1
+                synchronized(syncMap) {
+                    for (pair in suffixData) {
+                        if (pair.contains(':')) {
+                            val (suf, count) = pair.split(':')
+                            syncMap[suf] = syncMap.getOrDefault(suf, 0) + count.toInt()
+                        }
+                    }
+                }
+            }
         }
+        file.delete()
     }
 
-    return graph
+    // Write final output
+    File(fileOutput).bufferedWriter().use { writer ->
+        for ((prefix, suffixMap) in globalGraph) {
+            val neighbors = suffixMap.keys.toList()
+            val counts = neighbors.map { suffixMap[it] }
+            writer.write("$prefix$CONNECTOR${neighbors.joinToString(DELIMITER.toString())}$SEPARATOR${counts.joinToString(DELIMITER.toString())}")
+            writer.newLine()
+        }
+    }
+    println("------ Global graph generation complete.")
+}
+
+/**
+ * Merges thread-specific files into a global De Bruijn graph (no weights).
+ * Aggregates all suffixes for each prefix found across all threads.
+ */
+fun mergeGlobalDeBruijn(fileOutput: String, tempFolder: String) {
+    val tempFiles = File(tempFolder).listFiles { f -> f.name.endsWith(".ex2") } ?: return
+
+    // Global map to consolidate suffixes from all threads
+    // Prefix -> Set of unique suffixes
+    val globalGraph = HashMap<String, HashSet<String>>()
+
+    println("---- Merging ${tempFiles.size} thread files into global graph...")
+
+    for (file in tempFiles) {
+        file.useLines { lines ->
+            lines.forEach { line ->
+                if (line.isBlank()) return@forEach
+
+                val arrowIdx = line.indexOf(CONNECTOR)
+                if (arrowIdx != -1) {
+                    val prefix = line.substring(0, arrowIdx)
+                    val suffixes = line.substring(arrowIdx + 1).split(DELIMITER)
+
+                    val neighborSet = globalGraph.getOrPut(prefix) { HashSet() }
+                    for (suf in suffixes) {
+                        if (suf.isNotBlank()) neighborSet.add(suf)
+                    }
+                }
+            }
+        }
+        file.delete() // Clean up temp file after processing
+    }
+
+    // Write final Consolidated Graph
+    File(fileOutput).bufferedWriter().use { writer ->
+        for ((prefix, neighbors) in globalGraph) {
+            // Format: AA>AC,AT;
+            writer.write("$prefix$CONNECTOR${neighbors.joinToString(DELIMITER.toString())}$SEPARATOR")
+            writer.newLine()
+        }
+    }
+    println("------ Global graph generation complete.")
 }

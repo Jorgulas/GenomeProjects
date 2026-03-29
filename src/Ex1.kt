@@ -220,29 +220,49 @@ fun getKMersParallel(
             queue.put(LineBatch(batchId++, currentBatch))
         }
     }
-    println("---- Total sequence lines enqueued: $linesEnqueued")
+    println("------ Total sequence lines enqueued: $linesEnqueued")
 
     // One poison pill per worker
     repeat(numThreads) { queue.put(POISON_BATCH) }
 
     // Await completion
     futures.forEach { it.get() }
-    println("---- Finished processing k-mers in parallel.")
-    println("---- Now merging temporary files in batch order...")
+    println("------ Finished processing k-mers in parallel.")
     mergeTempFiles(fileOutput, tempFolder, extension = ".ex1")
 }
 
 
 // -----------------------------------------------------------------------------
-// Entry point
+// Run caller point
 // -----------------------------------------------------------------------------
+class Ex1 {
+    companion object {
+        @JvmStatic
+        fun run(fileInput: String, fileOutput:String, k: Int) {
+            val numThreads = Runtime.getRuntime().availableProcessors()
+            measureAndPrintTime("Finished analyzing file $fileInput") {
+                getKMersParallel(
+                    filePath   = fileInput,
+                    k          = k,
+                    numThreads = numThreads,
+                    fileOutput = fileOutput
+                )
+            }
+        }
+    }
+}
 
+// -----------------------------------------------------------------------------
+// Standalone entry point for direct execution
+// -----------------------------------------------------------------------------
 fun main() {
-    val filePath   = "SRR494099.fastq.gz"
-    
-    println("---- First 10 lines of $filePath:")
+    val fileInput   = "SRR20964298_1.fastq.gz"
+    val fileOutput = "results/Result_1_" + fileInput.substring(0, fileInput.length-9) + ".csv"
+    val k          = 6
+
+    println("---- First 10 lines of $fileInput:")
     BufferedReader(
-        InputStreamReader(GZIPInputStream(File(filePath).inputStream(), GZIP_BUFFER))
+        InputStreamReader(GZIPInputStream(File(fileInput).inputStream(), GZIP_BUFFER))
     ).use { reader ->
         var i = 0
         while (i  < 10) {
@@ -252,19 +272,5 @@ fun main() {
             i++
         }
     }
-
-    val fileOutput = "results/Result_1_" + filePath.substring(0, filePath.length-9) + ".csv"
-    val k           = 3
-    val numThreads = Runtime.getRuntime().availableProcessors()
-
-    println("---- Using $numThreads threads (availableProcessors)")
-
-    measureAndPrintTime("Finished analyzing file $filePath") {
-        getKMersParallel(
-            filePath   = filePath,
-            k          = k,
-            numThreads = numThreads,
-            fileOutput = fileOutput
-        )
-    }
+    Ex1.run(fileInput,fileOutput, k)
 }

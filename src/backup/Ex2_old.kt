@@ -1,3 +1,5 @@
+package backup
+
 /**
  * ## Obter o Grafo De Bruijn
  * O objetivo deste exercício é, dado um conjunto de k-mers, obter o grafo de Bruijn. Por exemplo, se considerarmos o
@@ -29,6 +31,14 @@
  *
  */
 
+import CONNECTOR
+import DELIMITER
+import LineBatch
+import SEPARATOR
+import buildDeBruijnGraph
+import measureAndPrintTime
+import mergeTempFiles
+import processFileBatches
 import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
@@ -37,18 +47,21 @@ import kotlin.collections.iterator
 // -----------------------------------------------------------------------------
 // Tuning constants
 // -----------------------------------------------------------------------------
+
 private const val EX2_QUEUE_CAPACITY = 20
-private const val EX2_BATCH_SIZE = 100_000
+private const val EX2_BATCH_SIZE = 200_000
 
 // -----------------------------------------------------------------------------
 // Batch model + format tokens
 // -----------------------------------------------------------------------------
+
 private val EX2_POISON = LineBatch(-1, emptyList())
 
 
 // -----------------------------------------------------------------------------
 // Worker — processes one batch → one temp file with one graph line per input line
 // -----------------------------------------------------------------------------
+
 /**
  * Consumes a single [KmerLineBatch] from [queue] and, **for each input line**,
  * builds a local De Bruijn graph and writes **one output line** in the format:
@@ -62,70 +75,46 @@ private val EX2_POISON = LineBatch(-1, emptyList())
  * **No global state** is accumulated across lines — the per-line graph is tiny
  * (at most O(4^(k-1)) = 16 prefixes for k=3) and is allocated fresh each line.
  */
-/**
- * Consumes batches and builds a local thread-specific De Bruijn graph.
- * Once all batches are processed, it outputs one file per vertex (prefix)
- * containing all suffixes found by this thread.
- */
-
-private fun buildGlobalDeBruijnWorker(
-    threadId: Int,
+private fun buildDeBruijnWorker(
     queue: LinkedBlockingQueue<LineBatch>,
     tempFolder: String
 ) {
-    // Prefix -> (Suffix -> Count)
-    val localGraph = Pair<HashMap<String, HashSet<String>>, HashMap<String, HashMap<String,Int>>>(HashMap(), HashMap())
-
     while (true) {
         val batch = queue.take()
         if (batch.batchId == -1) break
 
-        for (rawLine in batch.lines) {
-            val line = rawLine.trim()
-            if (line.isEmpty()) continue
+        val tempFile = File(tempFolder, "${batch.batchId}.ex2")
+        tempFile.bufferedWriter().use { writer ->
+            // Per-line graph — reused buffer cleared each iteration
+            val lineGraph = HashMap<String, MutableList<String>>(16)
 
-            // Assuming input is from Ex1: ATC;TCG;CGA
-            val kmers = line.split(SEPARATOR)
-            for (kmer in kmers) {
-                if (kmer.length < 2) continue
-                val prefix = kmer.substring(0, kmer.length - 1)
-                val suffix = kmer.substring(1)
-                
-                if (NEED_COUNT_4_Ex2) {
-                    val counts = localGraph.second.getOrPut(prefix) { HashMap() }
-                    counts[suffix] = counts.getOrDefault(suffix, 0) + 1
-                }
-                else {
-                    val neighbors = localGraph.first.getOrPut(prefix) { HashSet() }
-                    neighbors.add(suffix) // Duplicates are ignored here
-                }
-                
-            }
-        }
-    }
+            for (rawLine in batch.lines) {
+                val line = rawLine.trim()
+                if (line.isEmpty()) continue
 
-    // FLUSH: Write the ENTIRE local graph to ONE file per thread
-    val threadFile = File(tempFolder, "t${threadId}.ex2")
-    threadFile.bufferedWriter().use { writer ->
-        if (NEED_COUNT_4_Ex2) {
-            for ((prefix, suffixMap) in localGraph.second) {
-                val sb = StringBuilder()
-                for ((suffix,count) in suffixMap) {
-                    //OPTION B: For debugging or weighted graph (AA>AT:3) - Uncomment if needed
-                    sb.append("$suffix:$count").append(DELIMITER)
+                lineGraph.clear()
+
+                // Parse comma-separated k-mers and populate the local graph
+                var pos = 0
+                while (pos < line.length) {
+                    val commaIdx = line.indexOf(SEPARATOR, pos)
+                    val end = if (commaIdx == -1) line.length else commaIdx
+                    val kLen = end - pos
+                    if (kLen >= 2) {
+                        // prefix = kmer[0..kLen-2], suffix = kmer[1..kLen-1]
+                        val prefix = line.substring(pos, pos + kLen - 1)
+                        val suffix = line.substring(pos + 1, pos + kLen)
+                        lineGraph.getOrPut(prefix) { mutableListOf() }.add(suffix)
+                    }
+                    pos = end + 1
                 }
-                writer.write("$prefix$CONNECTOR${sb.toString()}")
-                writer.newLine()
-            }
-        }
-        else {
-            for ((prefix, suffixMap) in localGraph.first) {
-                val sb = StringBuilder()
-                for (suffix in suffixMap) {
-                    //OPTION A: Deduplicated format (AA>AT) - Recommended for Performance & Contigs
-                    sb.append(suffix).append(DELIMITER)
-                }
-                writer.write("$prefix$CONNECTOR${sb.toString()}")
+
+                if (lineGraph.isEmpty()) continue
+
+                // Write one graph line: AA>AT;CC>CA;GG>GG,GA;...
+                for ((prefix, suffixes) in lineGraph)
+                    writer.write(prefix + CONNECTOR + suffixes.joinToString(DELIMITER.toString()) + SEPARATOR)
+
                 writer.newLine()
             }
         }
@@ -152,59 +141,45 @@ fun buildDeBruijnGraph(
     numThreads: Int = Runtime.getRuntime().availableProcessors(),
     tempFolder: String = "temporary_files/ex2/"
 ) {
-    val tempDir = File(tempFolder)
-    if (tempDir.exists()) tempDir.deleteRecursively() // Clear old temp files
-    tempDir.mkdirs()
+    File(tempFolder).mkdirs()
 
     val queue = LinkedBlockingQueue<LineBatch>(EX2_QUEUE_CAPACITY)
     val executor = Executors.newFixedThreadPool(numThreads)
 
-    // Pass the thread index (it) as the threadId
-    val futures = (0..<numThreads).map { threadId ->
-        executor.submit { buildGlobalDeBruijnWorker(threadId, queue, tempFolder) }
+    val futures = (0..<numThreads).map {
+        executor.submit { buildDeBruijnWorker(queue, tempFolder) }
     }
     executor.shutdown()
 
     println("---- Reading k-mer file: $fileInput")
     val linesRead = processFileBatches(fileInput, queue, EX2_BATCH_SIZE)
-    println("------ Total lines read: $linesRead")
+    println("---- Total lines read: $linesRead")
 
+    // One poison pill per worker to signal end-of-stream
     repeat(numThreads) { queue.put(EX2_POISON) }
     futures.forEach { it.get() }
-    println("------ Finished building partial graphs per thread.")
+    println("---- Finished building per-read De Bruijn graphs.")
 
-    // Use the newly created merge function
-    if (NEED_COUNT_4_Ex2)
-        mergeVertexTempFilesWithWeights(fileOutput, tempFolder)
-    else
-        mergeGlobalDeBruijn(fileOutput, tempFolder)
+    mergeTempFiles(fileOutput, tempFolder, extension = ".ex2")
 }
 
 // -----------------------------------------------------------------------------
-// Run caller point
+// Entry point
 // -----------------------------------------------------------------------------
-class Ex2 {
-    companion object {
-        @JvmStatic
-        fun run(fileInput: String, fileOutput:String) {
-            val numThreads = Runtime.getRuntime().availableProcessors()
-            measureAndPrintTime("Finished building De Bruijn graph") {
-                buildDeBruijnGraph(
-                    fileInput  = fileInput,
-                    fileOutput = fileOutput,
-                    numThreads = numThreads
-                )
-            }
-        }
-    }
-}
 
-// -----------------------------------------------------------------------------
-// Standalone entry point for direct execution
-// -----------------------------------------------------------------------------
 fun main() {
     val filePath   = "SRR494099.fastq.gz"
     val fileInput  = "results/Result_1_" + filePath.substring(0, filePath.length-9) + ".csv"
     val fileOutput = "results/Result_2_"+ filePath.substring(0, filePath.length-9) + ".csv"
-    Ex2.run(fileInput,fileOutput)
+    val numThreads = Runtime.getRuntime().availableProcessors()
+
+    println("---- Using $numThreads threads (availableProcessors)")
+
+    measureAndPrintTime("Finished building De Bruijn graph") {
+        buildDeBruijnGraph(
+            fileInput = fileInput,
+            fileOutput = fileOutput,
+            numThreads = numThreads
+        )
+    }
 }
