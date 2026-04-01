@@ -4,10 +4,11 @@
 
 **Files**:  
 * [Ex1.kt](src/Ex1.kt) - Contains the implementation of K-Mer extraction.
-* [Ex2.kt](src/backup/Ex2_old.kt) - Contains the implementation of De Bruijn Graph construction.
+* [Ex2.kt](src/Ex2.kt) - Contains the implementation of De Bruijn Graph construction.
 * [Ex3.kt](src/Ex3.kt) - Contains the implementation of Eulerian Path constructor.
 * [Ex4.kt](src/Ex4.kt) - Contains the implementation of Contig Detector.
 * [QoL_Functions.kt](src/QoL_Functions.kt) - Contains "quality of life" functions used across the implementations.
+* [RunAll.kt](src/RunAll.kt) - Contains the main function to run all implementations sequentially.
 
 ### Usage
 To Start, you need a file from 

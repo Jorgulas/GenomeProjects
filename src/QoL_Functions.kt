@@ -1,4 +1,5 @@
 import java.io.File
+import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.StandardOpenOption.CREATE
 import java.nio.file.StandardOpenOption.READ
@@ -60,27 +61,47 @@ fun processFileBatches(
  *  * order, no graph-level merging is needed — this is a plain file concatenation.
  *  */
  */
-fun mergeTempFiles(fileOutput: String, tempFolder: String, extension: String) {
+fun mergeTempFilesParallel(fileOutput: String, tempFolder: String, extension: String) {
     val tempFiles = File(tempFolder)
         .listFiles { f -> f.name.endsWith(extension) }
         ?.sortedBy { f -> f.nameWithoutExtension.toIntOrNull() ?: Int.MAX_VALUE }
         ?: emptyList()
 
-    println("------ Merging ${tempFiles.size} temporary files in batch order in $fileOutput...")
+    if (tempFiles.isEmpty()) return
+    println("------ Merging ${tempFiles.size} temporary files into $fileOutput...")
 
     val outputPath = File(fileOutput).also { it.parentFile?.mkdirs() }.toPath()
-    FileChannel.open(outputPath, CREATE, WRITE, TRUNCATE_EXISTING).use { out ->
-        for (temp in tempFiles) {
-            FileChannel.open(temp.toPath(), READ).use { inp ->
+
+    // 1. Calculate the exact byte offset where each file should start writing
+    val fileOffsets = ArrayList<Pair<File, Long>>(tempFiles.size)
+    var currentOffset = 0L
+    for (file in tempFiles) {
+        val size = file.length()
+        fileOffsets.add(Pair(file, currentOffset))
+        currentOffset += size
+    }
+
+    FileChannel.open(outputPath, CREATE, WRITE, TRUNCATE_EXISTING).use { outChannel ->
+        // 2. Pre-allocate the massive file instantly on the OS level
+        if (currentOffset > 0) {
+            outChannel.position(currentOffset - 1)
+            outChannel.write(ByteBuffer.wrap(byteArrayOf(0)))
+        }
+
+        // 3. Blast the files into the pre-allocated space concurrently
+        fileOffsets.parallelStream().forEach { (file, startOffset) ->
+            FileChannel.open(file.toPath(), READ).use { inChannel ->
                 var pos = 0L
-                val size = inp.size()
-                while (pos < size)
-                    pos += inp.transferTo(pos, size - pos, out)
+                val size = inChannel.size()
+                while (pos < size) {
+                    // transferFrom is thread-safe for specific offsets!
+                    pos += outChannel.transferFrom(inChannel, startOffset + pos, size - pos)
+                }
             }
-            try { temp.delete() } catch (e: Exception) { println(">>>> Erro ao eliminar ${temp.name}: $e") }
+            try { file.delete() } catch (_: Exception) { /* Ignore OS locks */ }
         }
     }
-    println("------ Merge complete.")
+    println("------ merge complete.")
 }
 
 
@@ -174,4 +195,18 @@ fun mergeGlobalDeBruijn(fileOutput: String, tempFolder: String) {
         }
     }
     println("------ Global graph generation complete.")
+}
+
+
+// EXECUTE BLOCK X TIMES AND CALCULATE AVERAGE TIME
+inline fun measureAverageTime(times: Int, message: String, block: () -> Unit) {
+    var totalTime = 0L
+    repeat(times) {
+        val startTime = System.currentTimeMillis()
+        block()
+        totalTime += (System.currentTimeMillis() - startTime)
+    }
+    val average = totalTime / times.toDouble() / 1000.0
+    println("»» Average Execution Time over $times runs: ${"%.2f".format(average)} seconds")
+    println("»»» $message «««")
 }

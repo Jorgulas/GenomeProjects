@@ -33,12 +33,13 @@ import java.io.File
 import java.util.concurrent.Executors
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.collections.iterator
+import kotlin.text.substringBefore
 
 // -----------------------------------------------------------------------------
 // Tuning constants
 // -----------------------------------------------------------------------------
 private const val EX2_QUEUE_CAPACITY = 20
-private const val EX2_BATCH_SIZE = 100_000
+private const val EX2_BATCH_SIZE = 200_000
 
 // -----------------------------------------------------------------------------
 // Batch model + format tokens
@@ -90,7 +91,7 @@ private fun buildGlobalDeBruijnWorker(
                 if (kmer.length < 2) continue
                 val prefix = kmer.substring(0, kmer.length - 1)
                 val suffix = kmer.substring(1)
-                
+
                 if (NEED_COUNT_4_Ex2) {
                     val counts = localGraph.second.getOrPut(prefix) { HashMap() }
                     counts[suffix] = counts.getOrDefault(suffix, 0) + 1
@@ -99,7 +100,7 @@ private fun buildGlobalDeBruijnWorker(
                     val neighbors = localGraph.first.getOrPut(prefix) { HashSet() }
                     neighbors.add(suffix) // Duplicates are ignored here
                 }
-                
+
             }
         }
     }
@@ -114,7 +115,8 @@ private fun buildGlobalDeBruijnWorker(
                     //OPTION B: For debugging or weighted graph (AA>AT:3) - Uncomment if needed
                     sb.append("$suffix:$count").append(DELIMITER)
                 }
-                writer.write("$prefix$CONNECTOR${sb.toString()}")
+                writer.write("$prefix$CONNECTOR")
+                writer.write(sb.toString())
                 writer.newLine()
             }
         }
@@ -125,7 +127,8 @@ private fun buildGlobalDeBruijnWorker(
                     //OPTION A: Deduplicated format (AA>AT) - Recommended for Performance & Contigs
                     sb.append(suffix).append(DELIMITER)
                 }
-                writer.write("$prefix$CONNECTOR${sb.toString()}")
+                writer.write("$prefix$CONNECTOR")
+                writer.write(sb.toString())
                 writer.newLine()
             }
         }
@@ -204,7 +207,7 @@ class Ex2 {
 // -----------------------------------------------------------------------------
 fun main() {
     val filePath   = "SRR494099.fastq.gz"
-    val fileInput  = "results/Result_1_" + filePath.substring(0, filePath.length-9) + ".csv"
-    val fileOutput = "results/Result_2_"+ filePath.substring(0, filePath.length-9) + ".csv"
+    val fileInput  = "results/Result_1_" + filePath.substringBefore(".fastq.gz") + ".csv"
+    val fileOutput = "results/Result_2_"+ filePath.substringBefore(".fastq.gz") + ".csv"
     Ex2.run(fileInput,fileOutput)
 }

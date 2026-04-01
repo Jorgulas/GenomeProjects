@@ -1,72 +1,153 @@
 /**
- * Um percurso Euleriano num grafo é um percurso que passa por todas as arestas do grafo exatamente uma vez. Para
- * existir um grafo Caminho Euleriano tem de existir no máximo um vértice que tem (outdegree)- (indegree) = 1 e
- * no máximo um vértice tem (indegree)- (outdegree) = 1. Todos os outros vértices têm indegree e outdegree iguais.
- * Neste trabalho assuma que os dados utilizados permitem sempre a existência de um percurso Euleriano. Para obter o
- * percurso Euleriano, deverá utilizar o algoritmo de Hierholzer.
+ * Um percurso Euleriano num grafo é um percurso que passa por todas as arestas do grafo exatamente uma vez.
+ * Neste trabalho assuma que os dados utilizados permitem sempre a existência de um percurso Euleriano.
+ * Para obter o percurso Euleriano, deverá utilizar o algoritmo de Hierholzer.
  */
 
 import java.io.File
+import kotlin.system.measureTimeMillis
+
+// -----------------------------------------------------------------------------
+// Primitive Data Structures (Zero Object Overhead)
+// -----------------------------------------------------------------------------
+
+/**
+ * A memory-efficient stack using a primitive IntArray.
+ * Bypasses the massive memory overhead of ArrayDeque<Int> or ArrayList<Int>.
+ */
+class IntStack(initialCapacity: Int = 100_000) {
+    var data = IntArray(initialCapacity)
+    var size = 0
+
+    fun push(v: Int) {
+        if (size == data.size) {
+            data = data.copyOf(size * 2)
+        }
+        data[size++] = v
+    }
+
+    fun pop(): Int = data[--size]
+    fun peek(): Int = data[size - 1]
+    fun isNotEmpty() = size > 0
+}
+
+/**
+ * Stores edges for a specific node using primitive arrays.
+ */
+class NodeEdges {
+    var targets = IntArray(2)
+    var counts = IntArray(2)
+    var size = 0
+
+    fun add(target: Int, count: Int) {
+        if (size == targets.size) {
+            targets = targets.copyOf(size * 2)
+            counts  = counts.copyOf(size * 2)
+        }
+        targets[size] = target
+        counts[size] = count
+        size++
+    }
+
+    // Fetches the next available edge and decrements its count
+    fun getNextAndDecrement(): Int {
+        while (size > 0) {
+            val idx = size - 1
+            if (counts[idx] > 0) {
+                counts[idx]--
+                val target = targets[idx]
+                if (counts[idx] == 0) {
+                    size-- // Edge fully exhausted, remove it
+                }
+                return target
+            } else {
+                size--
+            }
+        }
+        return -1 // No edges left
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Global Graph State & Dictionary
+// -----------------------------------------------------------------------------
+
+
+// Maps a String to a unique Int ID
+val idMap = HashMap<String, Int>()
+// Maps the Int ID back to the String for the final output
+val reverseMap = ArrayList<String>()
+// The Graph, indexed by Int ID
+val globalGraph = ArrayList<NodeEdges>()
+
+/**
+ * Gets or creates a unique integer ID for a string node.
+ */
+fun getNodeId(sequence: String): Int {
+    var id = idMap[sequence]
+    if (id == null) {
+        id = reverseMap.size
+        idMap[sequence] = id
+        reverseMap.add(sequence)
+        globalGraph.add(NodeEdges())
+    }
+    return id
+}
 
 // -----------------------------------------------------------------------------
 // Start-vertex selection (Global Graph)
 // -----------------------------------------------------------------------------
 
-private fun findStartVertex(graph: Map<String, MutableList<String>>): String {
-    val outDeg = HashMap<String, Int>(graph.size * 2)
-    val inDeg  = HashMap<String, Int>(graph.size * 2)
+private fun findStartVertex(): Int {
+    val nodeCount = globalGraph.size
+    val outDeg = IntArray(nodeCount)
+    val inDeg  = IntArray(nodeCount)
 
     // Calculate In-Degrees and Out-Degrees
-    for ((prefix, neighbors) in graph) {
-        outDeg[prefix] = (outDeg[prefix] ?: 0) + neighbors.size
-        for (suf in neighbors) {
-            inDeg[suf] = (inDeg[suf] ?: 0) + 1
+    for (i in 0 until nodeCount) {
+        val edges = globalGraph[i]
+        for (j in 0 until edges.size) {
+            val target = edges.targets[j]
+            val count = edges.counts[j]
+            outDeg[i] += count
+            inDeg[target] += count
         }
     }
 
     // Find the mathematical start of the Eulerian path
-    for ((v, out) in outDeg) {
-        if (out - (inDeg[v] ?: 0) == 1) {
-            println("------ Found specific start vertex: $v")
-            return v
+    for (i in 0 until nodeCount) {
+        if (outDeg[i] - inDeg[i] == 1) {
+            println("------ Found specific start vertex: ${reverseMap[i]}")
+            return i
         }
     }
 
-    // If perfect cycles exist everywhere, just pick the first available node
-    val fallback = graph.keys.firstOrNull() ?: ""
-    println("------ No unbalanced start node found. Defaulting to: $fallback")
-    return fallback
+    println("------ No unbalanced start node found. Defaulting to first node.")
+    return 0
 }
 
 // -----------------------------------------------------------------------------
-// Hierholzer's algorithm (Global Graph)
+// Hierholzer's algorithm (Primitive Global Graph)
 // -----------------------------------------------------------------------------
 
-/**
- * Finds an Eulerian path in the [graph] using Hierholzer's algorithm.
- * * Note: We use a MutableList instead of HashSet here because if an edge
- * appeared 5 times in the original reads, we must walk that edge 5 times!
- */
-private fun hierholzerGlobal(graph: HashMap<String, MutableList<String>>): ArrayDeque<String> {
-    val start = findStartVertex(graph)
-    if (start.isEmpty()) return ArrayDeque()
+private fun hierholzerGlobal(): IntStack {
+    if (globalGraph.isEmpty()) return IntStack(0)
 
-    val stack = ArrayDeque<String>()
-    val path  = ArrayDeque<String>()
+    val start = findStartVertex()
+    val stack = IntStack()
+    val path  = IntStack(1_000_000) // Pre-allocate larger space for path
 
-    stack.addLast(start)
+    stack.push(start)
 
     while (stack.isNotEmpty()) {
-        val v = stack.last()
-        val neighbors = graph[v]
+        val v = stack.peek()
+        val nextNode = globalGraph[v].getNextAndDecrement()
 
-        if (!neighbors.isNullOrEmpty()) {
-            // Remove the last edge to mark it as "visited" (O(1) operation)
-            val next = neighbors.removeLast()
-            stack.addLast(next)
+        if (nextNode != -1) {
+            stack.push(nextNode)
         } else {
             // Dead end reached, push to final path and backtrack
-            path.addFirst(stack.removeLast())
+            path.push(stack.pop())
         }
     }
     return path
@@ -76,71 +157,80 @@ private fun hierholzerGlobal(graph: HashMap<String, MutableList<String>>): Array
 // Main sequential pipeline
 // -----------------------------------------------------------------------------
 
-/**
- * Sequentially loads the global graph, reconstructing edge frequencies from
- * the weighted format, and calculates the Eulerian Path.
- */
 fun findEulerianPaths(fileInput: String, fileOutput: String) {
-    println("---- Loading entire Global Graph into memory for Eulerian Path...")
+    println("---- Loading entire Global Graph into memory using Dictionary Encoding...")
 
-    // Using MutableList instead of HashSet to allow duplicate edges (weights)
-    val globalGraph = HashMap<String, MutableList<String>>()
+    // Clear globals in case of multiple runs
+    idMap.clear()
+    reverseMap.clear()
+    globalGraph.clear()
     var totalEdges = 0
 
     File(fileInput).useLines { lines ->
         lines.forEach { line ->
             if (line.isNotBlank()) {
                 val arrowIdx = line.indexOf(CONNECTOR)
-                val semiIdx = line.indexOf(SEPARATOR)
 
                 if (arrowIdx != -1) {
-                    val prefix = line.substring(0, arrowIdx)
+                    val semiIdx = line.indexOf(SEPARATOR)
 
-                    // Extract neighbors and counts
-                    val suffixStr = if (semiIdx != -1) line.substring(arrowIdx + 1, semiIdx)
-                    else line.substring(arrowIdx + 1)
-                    val countStr = if (semiIdx != -1 && semiIdx + 1 < line.length) line.substring(semiIdx + 1)
-                    else ""
+                    val prefixStr = line.substring(0, arrowIdx)
+                    val prefixId = getNodeId(prefixStr)
+
+                    val suffixStr = if (semiIdx != -1) line.substring(arrowIdx + 1, semiIdx) else line.substring(arrowIdx + 1)
+                    val countStr = if (semiIdx != -1 && semiIdx + 1 < line.length) line.substring(semiIdx + 1) else ""
 
                     val neighbors = suffixStr.split(DELIMITER).filter { it.isNotBlank() }
                     val counts = countStr.split(DELIMITER).filter { it.isNotBlank() }.mapNotNull { it.toIntOrNull() }
 
-                    val edgeList = globalGraph.getOrPut(prefix) { mutableListOf() }
+                    val edges = globalGraph[prefixId]
 
-                    // If we have weights, expand them! (e.g., AC: 3 -> add AC, AC, AC)
                     if (counts.size == neighbors.size) {
                         for (i in neighbors.indices) {
-                            repeat(counts[i]) {
-                                edgeList.add(neighbors[i])
-                                totalEdges++
-                            }
+                            val targetId = getNodeId(neighbors[i])
+                            edges.add(targetId, counts[i])
+                            totalEdges += counts[i]
                         }
                     } else {
                         // Fallback if weights are missing
-                        edgeList.addAll(neighbors)
-                        totalEdges += neighbors.size
+                        for (neighbor in neighbors) {
+                            val targetId = getNodeId(neighbor)
+                            edges.add(targetId, 1)
+                            totalEdges++
+                        }
                     }
                 }
             }
         }
     }
 
-    println("------ Graph loaded. Nodes: ${globalGraph.size} | Total Edges: $totalEdges")
+    println("------ Graph loaded. Unique Nodes: ${globalGraph.size} | Total Edges: $totalEdges")
     println("---- Calculating Eulerian path...")
 
-    val path = hierholzerGlobal(globalGraph)
+    val path = hierholzerGlobal()
 
     println("------ Path calculated. Path length: ${path.size} nodes.")
     println("---- Writing output to $fileOutput...")
 
     File(fileOutput).also { it.parentFile?.mkdirs() }.bufferedWriter().use { writer ->
         if (path.isNotEmpty()) {
-            writer.write(path.joinToString("->"))
+            // Hierholzer's algorithm generates the path backwards, so we iterate down
+            writer.write(reverseMap[path.data[path.size - 1]])
+            for (i in path.size - 2 downTo 0) {
+                writer.write(CONNECTOR.code)
+                writer.write(reverseMap[path.data[i]])
+            }
             writer.newLine()
         } else {
             writer.write("No path found.")
         }
     }
+
+    // Free memory
+    idMap.clear()
+    reverseMap.clear()
+    globalGraph.clear()
+
     println("------ Done.")
 }
 
@@ -151,12 +241,13 @@ class Ex3 {
     companion object {
         @JvmStatic
         fun run(fileInput: String, fileOutput: String) {
-            measureAndPrintTime("Finished finding global Eulerian path") {
+            val time = measureTimeMillis {
                 findEulerianPaths(
                     fileInput  = fileInput,
                     fileOutput = fileOutput
                 )
             }
+            println("Finished finding global Eulerian path in ${time}ms")
         }
     }
 }
@@ -167,6 +258,6 @@ class Ex3 {
 fun main() {
     val filePath   = "SRR494099.fastq.gz"
     val fileInput  = "results/Result_2_" + filePath.substring(0, filePath.length-9) + ".csv"
-    val fileOutput = "results/Result_3_" + fileInput.substring(0, fileInput.length-9) + ".csv"
+    val fileOutput = "results/Result_3_" + filePath.substring(0, filePath.length-9) + ".csv"
     Ex3.run(fileInput, fileOutput)
 }
