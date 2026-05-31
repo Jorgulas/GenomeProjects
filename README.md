@@ -1,6 +1,7 @@
 # Algorithms in Bioinformatics
 
 ### This repository contains implementations of various algorithms used in bioinformatics, including K-Mer extraction, De Bruijn Graph construction, Eulerian Path constructor and Contig Detector.
+#### The implementations were carefully set so that they use concurrent processing in order to attain processing record speeds.
 
 **Files**:  
 * [Ex1.kt](src/Ex1.kt) - Contains the implementation of K-Mer extraction.
